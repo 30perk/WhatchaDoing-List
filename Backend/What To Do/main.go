@@ -3,22 +3,22 @@ package main
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"log"
+	"net/http"
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
-	"go.mongodb.org/mongo-driver/bson"
-
 )
 
 // Task struct
 type Task struct {
-	ID          string    `bson:"id" json:"id"`
-	Title       string `bson:"title" json:"title"`
-	Description string `bson:"description" json:"description"` 
+	ID          primitive.ObjectID `json:"id" bson:"_id,omitempty"`
+	Title       string             `json:"title" bson:"title"`
+	Description string             `json:"description" bson:"description"`
 }
 
 // Global variables for MongoDB client and collection
@@ -43,108 +43,109 @@ func connectToMongoDB() error {
 	return nil
 }
 
-// echo handlers
-
-// create
+// createTask handles task creation
 func createTask(c echo.Context) error {
-    task := new(Task)
-    if err := c.Bind(task); err != nil {
-		return err
-    }
-
-    _, err := collection.InsertOne(context.TODO(), task)
-    if err != nil {
+	task := new(Task)
+	if err := c.Bind(task); err != nil {
 		return err
 	}
 
-    return c.JSON(http.StatusCreated, task)
+	// Insert task into tasks collection
+	result, err := collection.InsertOne(context.TODO(), task)
+	if err != nil {
+		return err
+	}
+
+	// Set the ID of the task to the generated ID
+	task.ID = result.InsertedID.(primitive.ObjectID)
+
+	return c.JSON(http.StatusCreated, task)
 }
 
-// get tasks
+// getTasks handles fetching all tasks
 func getTasks(c echo.Context) error {
-    cur, err := collection.Find(context.TODO(), bson.D{})
-    if err != nil {
-        return err
-    }
-    defer cur.Close(context.TODO())
-    var tasks []Task
-    for cur.Next(context.TODO()) {
-        var task Task
-        err := cur.Decode(&task)
-        if err != nil {
-            return err
-        }
-        tasks = append(tasks, task)
-    }
-    if err := cur.Err(); err != nil {
-        return err
-    }
-    return c.JSON(http.StatusOK, tasks)
+	cur, err := collection.Find(context.TODO(), bson.D{})
+	if err != nil {
+		return err
+	}
+	defer cur.Close(context.TODO())
+	var tasks []Task
+	for cur.Next(context.TODO()) {
+		var task Task
+		err := cur.Decode(&task)
+		if err != nil {
+			return err
+		}
+		tasks = append(tasks, task)
+	}
+	if err := cur.Err(); err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, tasks)
 }
 
-// get task
-func getTask(c echo.Context) error {
-    id := c.Param("id")
-    var task Task
-    err := collection.FindOne(context.TODO(), bson.D{{"id", id}}).Decode(&task)
-    if err != nil {
-        return err
-    }
-    return c.JSON(http.StatusOK, task)
-}
-
-// update task
+// updateTask handles updating a task
 func updateTask(c echo.Context) error {
-    id := c.Param("id")
-    task := new(Task)
-    if err := c.Bind(task); err != nil {
-        return err
-    }
-    _, err := collection.UpdateOne(context.TODO(), bson.D{{"id", id}}, bson.D{{"$set", task}})
-    if err != nil {
-        return err
-    }
-    return c.JSON(http.StatusOK, task)
+	idParam := c.Param("id")
+	id, err := primitive.ObjectIDFromHex(idParam)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "Invalid task ID")
+	}
+	task := new(Task)
+	if err := c.Bind(task); err != nil {
+		return err
+	}
+	filter := bson.M{"_id": id}
+	update := bson.M{"$set": task}
+	_, err = collection.UpdateOne(context.TODO(), filter, update)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, task)
 }
 
-// delete task
+// deleteTask handles deleting a task
 func deleteTask(c echo.Context) error {
-    id := c.Param("id")
-    _, err := collection.DeleteOne(context.TODO(), bson.D{{"id", id}})
-    if err != nil {
-        return err
-    }
-    return c.NoContent(http.StatusNoContent)
+	idParam := c.Param("id")
+	id, err := primitive.ObjectIDFromHex(idParam)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "Invalid task ID")
+	}
+	filter := bson.M{"_id": id}
+	result, err := collection.DeleteOne(context.TODO(), filter)
+	if err != nil {
+		return err
+	}
+	if result.DeletedCount == 0 {
+		return echo.NewHTTPError(http.StatusNotFound, "Task not found")
+	}
+	return c.NoContent(http.StatusNoContent)
 }
-
-
-
-
 
 func main() {
-	// connect to db
-    err := connectToMongoDB()
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer client.Disconnect(context.TODO())
+	// Connect to MongoDB
+	err := connectToMongoDB()
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	//e echo
+	// Initialize Echo
 	e := echo.New()
-	//mid ware
+
+	// Middleware
 	e.Use(middleware.Logger())
-    e.Use(middleware.Recover())
+	e.Use(middleware.Recover())
+	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
+		AllowOrigins: []string{"http://localhost:3000"},
+		AllowMethods: []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete},
+	}))
 
+	// Routes
+	e.POST("/tasks", createTask)
+	e.GET("/tasks", getTasks)
+	e.PUT("/tasks/:id", updateTask)
+	e.DELETE("/tasks/:id", deleteTask)
 
-    // Routes
-    e.POST("/tasks", createTask)
-    e.GET("/tasks", getTasks)
-    e.GET("/tasks/:id", getTask)
-    e.PUT("/tasks/:id", updateTask)
-    e.DELETE("/tasks/:id", deleteTask)
-	
-
-
-
+	// Start server
 	e.Logger.Fatal(e.Start(":1323"))
 }
